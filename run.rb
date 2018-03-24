@@ -1,5 +1,6 @@
 load "lib.rb"
 
+ADMIN = "4998"
 
 $twitter = Twitter::REST::Client.new do |config|
   config.consumer_key, config.consumer_secret, config.access_token, config.access_token_secret = open(".twitter",&:read).split(?\n)
@@ -26,35 +27,62 @@ def set_flag(flags, flag) ; flags | flag ; end
 def unset_flag(flags, flag) ; flags ^ flag ; end
 
 def eval_message(msg)
-  flags = Message::WORD | Message::PUNCTUATION | Message::EOS
+  flags = 0
   if !msg.match(%r{^(?<esc>[\*\_]).+\k<esc>$})
-    puts "!msg.match(%r{^(?<esc>[\*\_]).+\k<esc>$}) == true"
+    #puts "!msg.match(%r{^(?<esc>[\*\_]).+\k<esc>$}) == true"
+    flags |= Message::WORD
     if msg.match(/[\.,?!]$/)
-      puts "msg.match(/[\.,?!]$/) == true"
+      #puts "msg.match(/[\.,?!]$/) == true"
+      flags |= Message::PUNCTUATION
       if msg.match(/[\.?!]$/)
-        puts "msg.match(/[\.?!]$/) == true"
+        #puts "msg.match(/[\.?!]$/) == true"
+        flags |= Message::EOS
       else
-        puts "msg.match(/[\.?!]$/) == false"
-        flags ^= Message::EOS
+        #puts "msg.match(/[\.?!]$/) == false"
       end
     else
-      puts "msg.match(/[\.,?!]$/) == false"
-      flags ^= Message::PUNCTUATION
+      #puts "msg.match(/[\.,?!]$/) == false"
     end
   else
-    puts "!msg.match(%r{^(?<esc>[\*\_]).+\k<esc>$}) == false"
+    #puts "!msg.match(%r{^(?<esc>[\*\_]).+\k<esc>$}) == false"
     flags = Message::COMMENT
   end
-  puts "eval_message -> #{flags}"
+  #puts "eval_message -> #{flags}"
   flags
 end
 
 $MSGQUEUE = [] # TODO all the message events go here as long as the bot hasn't finished initializing
+$booted = false
 
 $bot.ready {
-  $bot.on
-  $bot.game = ""
+  puts "Bot booting."
+  puts "defined?(TOKEN) = #{(defined? TOKEN).inspect}"
   CHANNEL = $bot.servers[INFO[:server]].channels.select{|i|i.id==INFO[:channel]}.first
+  puts "defined?(CHANNEL) = #{(defined? TOKEN).inspect}"
+
+  _messages = Discordrb::API::Channel.messages(TOKEN, INFO[:channel], 100)
+  puts "defined?(_messages) = #{(defined? _messages).inspect}"
+
+  _messages = JSON.parse(_messages.body).reverse.map do |i|
+    _str = Struct.new(:channel_id, :id, :content, :username, :discriminator)
+    _arr = i.values_at("channel_id", "id", "content") + i["author"].values_at("username", "discriminator")
+    eval "_str.new(#{_arr.map(&:inspect).join(?,)})"
+  end
+
+  # get the unfinished sentence:
+  _unfinished_sentence_index = _messages.reverse.map(&:content).map{|i|i =~ /[\.?!]$/}.index(0)
+  _unfinished_sentence = _messages.reverse[0..._unfinished_sentence_index].reverse
+
+  _unfinished_sentence.each{|i|$process_message_str.call(i)}
+
+  $MSGQUEUE.each{|i|msg = e.message.to_s.strip; $process_message_str.call(msg, e)}
+  $MSGQUEUE.clear
+
+  puts "FINISHED BOOT SEQUENCE."
+  puts "$SENTENCE = #{$sentence.join(" ").inspect}"
+  $booted = true
+
+  $bot.on
 
   loop{
     x = gets
@@ -66,7 +94,23 @@ $bot.ready {
 }
 
 $last_message_sender = nil
-process_message_str = lambda{ |msg, e=nil|
+$process_message_str = lambda{ |msg_, e=nil|
+
+  _username = nil
+  _discriminator = nil
+
+  msg = nil
+
+  if msg_.inspect[0..7] == "#<struct"
+    _username = msg_.username
+    _discriminator = msg_.discriminator
+    msg = msg_.content
+  else
+    _username = e.message.author.username
+    _discriminator = e.message.author.discriminator
+    msg = msg_
+  end
+
   msg_flags = eval_message msg
   out = false
 
@@ -77,22 +121,22 @@ process_message_str = lambda{ |msg, e=nil|
     out = true
   end
 
-  if e && e.message.author.discriminator == $last_message_sender && !out
-    puts "Same user (#{e.message.author.username}##{e.message.author.discriminator}) tried to send two words"
+  if _discriminator != ADMIN && _discriminator == $last_message_sender && !out
+    puts "Same user (#{_username}##{_discriminator}) tried to send two words"
     out = true
   end
 
-  if $sentence == [] && !out
+  if $sentence == [] && flag_set?(msg_flags, Message::PUNCTUATION) && !out
     puts "Punctuation was tried to make, but there were no words yet"
-    out = fale
+    out = true
   end
 
   if flag_set?(msg_flags, Message::PUNCTUATION) && !out
     $sentence[-1] << msg
     puts "$sentence[-1] << msg"
     if e
-      $last_message_sender = e.message.author.discriminator
-      puts "$last_message_sender = #{e.message.author.discriminator}"
+      $last_message_sender = _discriminator
+      puts "$last_message_sender = #{_discriminator}"
     end
   end
 
@@ -112,8 +156,8 @@ process_message_str = lambda{ |msg, e=nil|
     $sentence << msg
     puts "$sentence << msg"
     if e
-      $last_message_sender = e.message.author.discriminator
-      puts "$last_message_sender = #{e.message.author.discriminator}"
+      $last_message_sender = _discriminator
+      puts "$last_message_sender = #{_discriminator}"
     end
   end
 
@@ -122,5 +166,5 @@ process_message_str = lambda{ |msg, e=nil|
 
 $bot.message(in:INFO[:channel]){ |e|
   msg = e.message.to_s.strip
-  process_message_str.call(msg, e)
+  $booted ? $process_message_str.call(msg, e) : $MSGQUEUE.push(e)
 }
